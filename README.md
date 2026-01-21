@@ -44,7 +44,7 @@ pyenv install -s $(cat .python-version)
 pyenv local $(cat .python-version)
 
 ## Recreate environment
-uv sync --locked
+uv sync --frozen
 
 ## To run notebook or scripts from the shell
 source .venv/bin/activate
