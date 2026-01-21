@@ -46,6 +46,9 @@ pyenv local $(cat .python-version)
 ## Recreate environment
 uv sync --locked
 
+## To run notebook or scripts from the shell
+source .venv/bin/activate
+
 🧠 Mental Model (remember this)
 pyenv  → Python version
 uv     → deps + venv
