@@ -59,7 +59,7 @@ uv sync --frozen
 ## To run notebook or scripts from the shell
 source .venv/bin/activate
 
-.venv/bin/activate if windows
+.venv/Scripts/activate if windows
 
 
 🧠 Mental Model (remember this)
