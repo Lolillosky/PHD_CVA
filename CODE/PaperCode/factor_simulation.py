@@ -28,6 +28,7 @@ class RiskFactorSimulator:
         self.drift_array = torch.as_tensor(drift_array, dtype=self.dtype, device=self.device)
         self.volatility_array = torch.as_tensor(volatility_array, dtype=self.dtype, device=self.device)
         self.correl_matrix = torch.as_tensor(correl_matrix, dtype=self.dtype, device=self.device)
+
         self.time_steps = torch.as_tensor(time_steps, dtype=self.dtype, device=self.device)
 
 
@@ -47,8 +48,8 @@ class RiskFactorSimulator:
         """
         # --- time increments (handles irregular / odd time grids) ---
         # time_steps: shape (num_steps,), e.g. [0.25, 0.5, 1.0, 1.5]
-        t_full = torch.cat([torch.zeros(1, dtype=self.dtype, device=self.device), self.time_steps])  # prepend 0
-        delta_t = t_full[1:] - t_full[:-1]          # shape: (num_steps,)
+    
+        delta_t = self.time_steps[1:] - self.time_steps[:-1]          # shape: (num_steps,)
         num_steps = delta_t.shape[0]
 
         # --- Cholesky factor of correlation matrix ---
@@ -82,7 +83,7 @@ class RiskFactorSimulator:
         S0 = self.initial_spot_values.unsqueeze(0).unsqueeze(0)   # (1, 1, num_rf)
         paths = S0 * torch.exp(cum_log)   # (num_sims, num_steps, num_rf)
 
-        return paths
+        return torch.cat([S0.expand(num_sims,-1,-1), paths],dim = 1)
 
     def simulate_paths_with_bridge(
         self,
