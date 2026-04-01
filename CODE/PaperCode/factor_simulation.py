@@ -47,7 +47,7 @@ class RiskFactorSimulator:
             Simulated asset paths (starting AFTER t=0).
         """
         # --- time increments (handles irregular / odd time grids) ---
-        # time_steps: shape (num_steps,), e.g. [0.25, 0.5, 1.0, 1.5]
+        # time_steps: shape (num_steps,), e.g. [0, 0.25, 0.5, 1.0, 1.5]
     
         delta_t = self.time_steps[1:] - self.time_steps[:-1]          # shape: (num_steps,)
         num_steps = delta_t.shape[0]
@@ -119,7 +119,7 @@ class RiskFactorSimulator:
         dev, dt = self.device, self.dtype
         num_steps = len(self.time_steps)
 
-        if pivot_step_idx < 0 or pivot_step_idx >= num_steps:
+        if pivot_step_idx < 0 or pivot_step_idx > num_steps-1:
             raise ValueError(
                 f"pivot_step_idx={pivot_step_idx} out of range [0, {num_steps - 1}]."
             )
@@ -127,9 +127,9 @@ class RiskFactorSimulator:
         # ------------------------------------------------------------------ #
         # Time grid: prepend t=0                                              #
         # ------------------------------------------------------------------ #
-        t_full  = torch.cat([torch.zeros(1, dtype=dt, device=dev), self.time_steps])
-        delta_t = t_full[1:] - t_full[:-1]                          # (num_steps,)
-        t_pivot = t_full[pivot_step_idx + 1]                         # scalar
+
+        delta_t = self.time_steps[1:] - self.time_steps[:-1]                          # (num_steps,)
+        t_pivot = self.time_steps[pivot_step_idx]                         # scalar
 
         # ------------------------------------------------------------------ #
         # Cholesky factor (shared by both segments)                           #
@@ -171,79 +171,57 @@ class RiskFactorSimulator:
         #   Var[dZ_k | Z(T)] = ds * (T - s_k) / T
         # After sampling in Z-space, we apply L to get back to the correlated W.
         # ================================================================== #
-        n_bridge = pivot_step_idx + 1
 
-        if n_bridge > 0:
-            s_times = t_full[1 : n_bridge + 1]                      # (n_bridge,)
-            s_prev  = t_full[0 : n_bridge]                           # (n_bridge,)
-            ds      = s_times - s_prev                               # (n_bridge,)
 
-            # Conditional mean of dZ_k in independent space
-            # shape: (num_sims, n_bridge, num_rf)
-            cond_mean_dZ = (ds / t_pivot).unsqueeze(0).unsqueeze(-1) * Z_pivot.unsqueeze(1)
+        if pivot_step_idx > 0:
 
-            # Conditional std of dZ_k (scalar per step, same for all factors)
-            var_dZ_k = (ds * (t_pivot - s_times) / t_pivot).clamp(min=0.0)  # (n_bridge,)
-            std_dZ_k = torch.sqrt(var_dZ_k)                          # (n_bridge,)
+            phi = torch.randn(num_sims, pivot_step_idx - 1, self.num_risk_factors, dtype=self.dtype, device=self.device)
 
-            # Sample interior steps; last step is deterministic (std=0 at pivot)
-            n_interior = n_bridge - 1
-            if n_interior > 0:
-                z_interior = torch.randn(
-                    num_sims, n_interior, self.num_risk_factors, dtype=dt, device=dev
-                )
-                # Scale in independent space, then add conditional mean
-                dZ_interior = (
-                    std_dZ_k[:n_interior].unsqueeze(0).unsqueeze(-1) * z_interior
-                    + cond_mean_dZ[:, :n_interior, :]
-                )                                                    # (num_sims, n_interior, num_rf)
-            # Last step: exact deterministic pin (std=0)
-            dZ_last = cond_mean_dZ[:, n_bridge - 1 : n_bridge, :]   # (num_sims, 1, num_rf)
+            Z = torch.zeros(num_sims, pivot_step_idx + 1, self.num_risk_factors, dtype=dt, device=dev)
+            Z[:,-1,:] = Z_pivot
+            Z[:,0,:] = 0.0
 
-            if n_interior > 0:
-                dZ_bridge = torch.cat([dZ_interior, dZ_last], dim=1) # (num_sims, n_bridge, num_rf)
-            else:
-                dZ_bridge = dZ_last
+            for k in range(pivot_step_idx-1, 0, -1):
 
-            # Map back to correlated BM space: dW = dZ @ L.T
-            dW_bridge = dZ_bridge @ L.T                              # (num_sims, n_bridge, num_rf)
+                Z[:,k,:] = self.time_steps[k] * Z[:,k+1,:] / self.time_steps[k+1] + \
+                     torch.sqrt(self.time_steps[k] * (1.0 - self.time_steps[k] / self.time_steps[k+1])) * phi[:,k-1,:]       
 
-            # GBM log increments
-            dt_bridge      = delta_t[:n_bridge].unsqueeze(0).unsqueeze(-1)
-            log_inc_bridge = (mu - 0.5 * sigma ** 2) * dt_bridge + sigma * dW_bridge
-            cum_log_bridge = torch.cumsum(log_inc_bridge, dim=1)
-            paths_bridge   = S0.unsqueeze(0).unsqueeze(0) * torch.exp(cum_log_bridge)
+
+            W = Z @ L.T    # (num_sims, pivot_step_idx, num_rf)  correlated BM values at bridge steps
+
+            paths_bridge = S0.unsqueeze(0).unsqueeze(0) * torch.exp((mu - 0.5 * sigma ** 2) * self.time_steps[:pivot_step_idx+1].unsqueeze(0).unsqueeze(-1) + sigma * W)
+           
 
         # ================================================================== #
         # FORWARD SEGMENT  (pivot_step_idx … num_steps-1]                    #
         # ================================================================== #
-        n_forward = num_steps - n_bridge
+        # n_forward = num_steps - n_bridge
 
-        if n_forward > 0:
-            z_fwd = torch.randn(
-                num_sims, n_forward, self.num_risk_factors, dtype=dt, device=dev
-            )
-            sqrt_dt_fwd = torch.sqrt(delta_t[n_bridge:]).unsqueeze(0).unsqueeze(-1)
-            inc_W_fwd    = (z_fwd @ L.T) * sqrt_dt_fwd
+        # if n_forward > 0:
+        #     z_fwd = torch.randn(
+        #         num_sims, n_forward, self.num_risk_factors, dtype=dt, device=dev
+        #     )
+        #     sqrt_dt_fwd = torch.sqrt(delta_t[n_bridge:]).unsqueeze(0).unsqueeze(-1)
+        #     inc_W_fwd    = (z_fwd @ L.T) * sqrt_dt_fwd
 
-            dt_fwd       = delta_t[n_bridge:].unsqueeze(0).unsqueeze(-1)
-            log_inc_fwd  = (mu - 0.5 * sigma ** 2) * dt_fwd + sigma * inc_W_fwd
+        #     dt_fwd       = delta_t[n_bridge:].unsqueeze(0).unsqueeze(-1)
+        #     log_inc_fwd  = (mu - 0.5 * sigma ** 2) * dt_fwd + sigma * inc_W_fwd
 
-            cum_log_fwd  = torch.cumsum(log_inc_fwd, dim=1)
-            # Start from spot_at_pivot
-            paths_fwd = spot_at_pivot.unsqueeze(1) * torch.exp(cum_log_fwd)
+        #     cum_log_fwd  = torch.cumsum(log_inc_fwd, dim=1)
+        #     # Start from spot_at_pivot
+        #     paths_fwd = spot_at_pivot.unsqueeze(1) * torch.exp(cum_log_fwd)
 
-        # ================================================================== #
-        # Concatenate segments                                                #
-        # ================================================================== #
-        if n_bridge > 0 and n_forward > 0:
-            paths = torch.cat([paths_bridge, paths_fwd], dim=1)
-        elif n_bridge > 0:
-            paths = paths_bridge
-        else:
-            paths = paths_fwd
+        # # ================================================================== #
+        # # Concatenate segments                                                #
+        # # ================================================================== #
+        # if n_bridge > 0 and n_forward > 0:
+        #     paths = torch.cat([paths_bridge, paths_fwd], dim=1)
+        # elif n_bridge > 0:
+        #     paths = paths_bridge
+        # else:
+        #     paths = paths_fwd
 
-        return paths                                                 # (num_sims, num_steps, num_rf)
+        # return paths                                                 # (num_sims, num_steps, num_rf)
 
     
-
+        return paths_bridge
