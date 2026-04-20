@@ -195,33 +195,31 @@ class RiskFactorSimulator:
         # ================================================================== #
         # FORWARD SEGMENT  (pivot_step_idx … num_steps-1]                    #
         # ================================================================== #
-        # n_forward = num_steps - n_bridge
+        n_forward = num_steps - 1 - pivot_step_idx
 
-        # if n_forward > 0:
-        #     z_fwd = torch.randn(
-        #         num_sims, n_forward, self.num_risk_factors, dtype=dt, device=dev
-        #     )
-        #     sqrt_dt_fwd = torch.sqrt(delta_t[n_bridge:]).unsqueeze(0).unsqueeze(-1)
-        #     inc_W_fwd    = (z_fwd @ L.T) * sqrt_dt_fwd
+        if n_forward > 0:
+            z_fwd = torch.randn(
+                num_sims, n_forward, self.num_risk_factors, dtype=dt, device=dev
+            )
+            sqrt_dt_fwd = torch.sqrt(delta_t[pivot_step_idx:]).unsqueeze(0).unsqueeze(-1)
+            inc_W_fwd    = (z_fwd @ L.T) * sqrt_dt_fwd
 
-        #     dt_fwd       = delta_t[n_bridge:].unsqueeze(0).unsqueeze(-1)
-        #     log_inc_fwd  = (mu - 0.5 * sigma ** 2) * dt_fwd + sigma * inc_W_fwd
+            dt_fwd       = delta_t[pivot_step_idx:].unsqueeze(0).unsqueeze(-1)
+            log_inc_fwd  = (mu - 0.5 * sigma ** 2) * dt_fwd + sigma * inc_W_fwd
 
-        #     cum_log_fwd  = torch.cumsum(log_inc_fwd, dim=1)
-        #     # Start from spot_at_pivot
-        #     paths_fwd = spot_at_pivot.unsqueeze(1) * torch.exp(cum_log_fwd)
+            cum_log_fwd  = torch.cumsum(log_inc_fwd, dim=1)
+            # Start from spot_at_pivot
+            paths_fwd = spot_at_pivot.unsqueeze(1) * torch.exp(cum_log_fwd)
 
-        # # ================================================================== #
-        # # Concatenate segments                                                #
-        # # ================================================================== #
-        # if n_bridge > 0 and n_forward > 0:
-        #     paths = torch.cat([paths_bridge, paths_fwd], dim=1)
-        # elif n_bridge > 0:
-        #     paths = paths_bridge
-        # else:
-        #     paths = paths_fwd
+        # ================================================================== #
+        # Concatenate segments                                                #
+        # ================================================================== #
+        if pivot_step_idx > 0 and n_forward > 0:
+            paths = torch.cat([paths_bridge, paths_fwd], dim=1)
+        elif pivot_step_idx > 0:
+            paths = paths_bridge
+        else:
+            paths = paths_fwd
 
-        # return paths                                                 # (num_sims, num_steps, num_rf)
+        return paths                                                 # (num_sims, num_steps, num_rf)
 
-    
-        return paths_bridge
