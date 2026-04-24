@@ -221,5 +221,59 @@ class RiskFactorSimulator:
         else:
             paths = paths_fwd
 
-        return paths                                                 # (num_sims, num_steps, num_rf)
+        return paths     
+    
+    
+    def simulate_same_path_up_do_date(  self,
+        num_sims: int,
+        pivot_step_idx: int,
+    ) -> torch.Tensor:
+        
+        num_steps = len(self.time_steps)
+        if pivot_step_idx < 0 or pivot_step_idx > num_steps-1:
+            raise ValueError(
+                f"pivot_step_idx={pivot_step_idx} out of range [0, {num_steps - 1}]."
+            )
+    
+
+        delta_t = self.time_steps[1:] - self.time_steps[:-1]          # shape: (num_steps,)
+        num_steps = delta_t.shape[0]
+
+        # --- Cholesky factor of correlation matrix ---
+        L = torch.linalg.cholesky(self.correl_matrix)   # shape: (num_rf, num_rf)
+
+        # --- standard normal increments scaled by sqrt(delta_t) ---
+        # shape: (num_sims, num_steps, num_rf)
+        sqrt_dt = torch.sqrt(delta_t).unsqueeze(0).unsqueeze(-1)   # (1, num_steps, 1)
+        inc_W = torch.randn(
+            num_sims,
+            num_steps,
+            self.num_risk_factors,
+            dtype=self.dtype,
+            device=self.device,
+        ) * sqrt_dt
+
+        inc_W[:,:pivot_step_idx,:] = inc_W[0, :pivot_step_idx, :].unsqueeze(0).expand(num_sims, pivot_step_idx, -1)
+
+        # --- correlate increments: inc_W_correl = inc_W @ L.T ---
+        inc_W_correl = inc_W @ L.T    # (num_sims, num_steps, num_rf)
+
+        # --- GBM log-returns for each step ---
+        # sigma and mu shapes broadcast over (num_sims, num_steps, num_rf)
+        mu    = self.drift_array   # using vol as drift (risk-neutral); override if needed
+        sigma = self.volatility_array   # shape: (num_rf,)
+        dt    = delta_t.unsqueeze(0).unsqueeze(-1)   # (1, num_steps, 1)
+
+        log_increments = (mu - 0.5 * sigma ** 2) * dt + sigma * inc_W_correl
+
+        # --- cumulative product = cumulative sum in log space ---
+        # gross_rets[i,t,k] = S0[k] * exp(sum of log_increments up to t)
+        cum_log = torch.cumsum(log_increments, dim=1)   # (num_sims, num_steps, num_rf)
+        S0 = self.initial_spot_values.unsqueeze(0).unsqueeze(0)   # (1, 1, num_rf)
+        paths = S0 * torch.exp(cum_log)   # (num_sims, num_steps, num_rf)
+
+        return torch.cat([S0.expand(num_sims,-1,-1), paths],dim = 1)
+
+    
+                                               # (num_sims, num_steps, num_rf)
 
