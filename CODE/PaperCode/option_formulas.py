@@ -1,7 +1,7 @@
 import torch
 
 
-N = torch.distributions.Normal(loc=0.0, scale=1.0)
+N = torch.distributions.Normal(loc=0.0, scale=1.0).cdf
 
 
 def Black(Forward: torch.FloatTensor, Strike: torch.FloatTensor, 
