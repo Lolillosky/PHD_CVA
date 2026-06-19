@@ -65,14 +65,25 @@ def black_vectorized(Forward: torch.FloatTensor, Strike: torch.FloatTensor,
   rate = torch.as_tensor(rate, device=device, dtype=dtype)
   Vol = torch.as_tensor(Vol, device=device, dtype=dtype)
 
+  if torch.any(Forward <= 0):
+    raise ValueError('Negative forward in BS formula.')
+  if torch.any(TTM < 0):
+    raise ValueError('Negative time to maturity in BS formula.')
+  if torch.any(Vol < 0):
+    raise ValueError('Negative volatility in BS formula.')
+  if torch.any(Strike <= 0):
+    raise ValueError('Negative strike in BS formula.')
+
   positive_ttm = TTM > 0
+  positive_vol = Vol > 0
+  use_black = positive_ttm & positive_vol
 
   # Guard divisions/logs when TTM or Vol are zero; values are replaced for these entries later.
   safe_ttm = torch.clamp(TTM, min=eps)
   safe_vol = torch.clamp(Vol, min=eps)
   sqrt_ttm = torch.sqrt(safe_ttm)
 
-  log_fk = torch.log(torch.clamp(Forward, min=eps) / torch.clamp(Strike, min=eps))
+  log_fk = torch.log(Forward / Strike)
   d1 = (log_fk + 0.5 * safe_vol * safe_vol * safe_ttm) / (safe_vol * sqrt_ttm)
   d2 = d1 - safe_vol * sqrt_ttm
 
@@ -84,7 +95,7 @@ def black_vectorized(Forward: torch.FloatTensor, Strike: torch.FloatTensor,
   intrinsic = torch.maximum(Forward - Strike, torch.zeros_like(Forward)) if IsCall \
       else torch.maximum(Strike - Forward, torch.zeros_like(Forward))
 
-  return torch.where(positive_ttm, model_price, intrinsic)
+  return torch.where(use_black, model_price, intrinsic)
     
 
 
@@ -99,7 +110,6 @@ def basket_geom_asian(init_time_array, value_date_index, risk_free_rate, num_ass
   * num_assets (int): number of underlying assets.
   * assets_vol (array(float)): array of indiv assets vols.
   * assets_correl (array(float, float)): matrix of correlations
-  * initial_maturity (float): maturity of the product as seen on initial spot fixing date.
   * price_history (array(float, float)): history of fixings of the underlyings up to value date. Assets per row, time steps per column.
   * IsCall (bool): True if call option, False if put option
   Outputs:
@@ -146,7 +156,6 @@ def basket_geom_asian_vectorized(init_time_array, risk_free_rate, num_assets,
   * num_assets (int): number of underlying assets.
   * assets_vol (array(float)): array of indiv assets vols.
   * assets_correl (array(float, float)): matrix of correlations
-  * initial_maturity (float): maturity of the product as seen on initial spot fixing date.
   * price_history (array): fixing history with RNN-style shape
     (simulations, time, assets).
   * IsCall (bool): True if call option, False if put option
