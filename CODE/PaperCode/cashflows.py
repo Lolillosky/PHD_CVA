@@ -52,8 +52,8 @@ def basket_geom_asian_cashflows(
     else:
         payoff = torch.maximum(strike - geom_average, torch.zeros_like(geom_average))
 
-    maturity = init_time_array[-1] - init_time_array[0]
-    discounted_payoff = payoff * torch.exp(-risk_free_rate * maturity)
+    maturities = init_time_array[-1] - init_time_array
+    discounted_payoffs = payoff.unsqueeze(-1) * torch.exp(-risk_free_rate * maturities)
 
     cashflows = torch.zeros(
         price_history.shape[0],
@@ -61,9 +61,16 @@ def basket_geom_asian_cashflows(
         device=price_history.device,
         dtype=price_history.dtype,
     )
-    cashflows[:, -1] = discounted_payoff
+
+    cashflows[:, -1] = payoff
+
+    return_dict = {
+        "cashflows": cashflows,
+        "discounted_cashflows": discounted_payoffs}
+
 
     if keep_feature_dim:
-        return cashflows.unsqueeze(-1)
+        return_dict["cashflows"] = cashflows.unsqueeze(-1)
+        return_dict["discounted_cashflows"] = discounted_payoffs.unsqueeze(-1)
 
-    return cashflows
+    return return_dict
