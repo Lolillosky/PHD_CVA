@@ -30,8 +30,8 @@ class DeepLearningCVADataset(Dataset):
         else:
             self.X_mu = np.mean(X, axis=0)
             self.X_sigma = np.std(X, axis=0) + eps
-            self.y_mu = np.mean(y[:, 0])
-            self.y_sigma = np.std(y[:, 0]) + eps
+            self.y_mu = np.mean(y, axis=0)
+            self.y_sigma = np.std(y, axis=0) + eps
 
         if X.ndim != 3:
             raise ValueError(f"X must be 3D, got shape {X.shape}")
@@ -45,26 +45,9 @@ class DeepLearningCVADataset(Dataset):
         self.dtype = dtype
         self.num_inputs = X.shape[1]
 
-
-
-        # Copy target array so original input is untouched
-        y_scaled = y.copy()
-
-        # Scale sensitivities to match normalized variables:
-        # x_scaled = (x - X_mu) / X_sigma
-        # y_scaled = (y - y_mu) / y_sigma
-        # => d(y_scaled)/d(x_scaled) = dy/dx * X_sigma / y_sigma
-        y_scaled[:, 1:] *= self.X_sigma / self.y_sigma
-
-        # Per-dimension normalization for derivative loss
-        self.dydX_scaled_L2_norm = np.mean(y_scaled[:, 1:] ** 2, axis=0) + eps
-
-        # Scale scalar target
-        y_scaled[:, 0] = (y_scaled[:, 0] - self.y_mu) / self.y_sigma
-
         # Store tensors
         self.X = torch.tensor((X - self.X_mu) / self.X_sigma, dtype=dtype)
-        self.y = torch.tensor(y_scaled, dtype=dtype)
+        self.y = torch.tensor((y - self.y_mu) / self.y_sigma, dtype=dtype)
 
         self.len = self.X.shape[0]
 
