@@ -1,0 +1,28 @@
+# macOS metadata
+.DS_Store
+
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.env.*
+
+# Jupyter local state
+.ipynb_checkpoints/
+
+# Local credentials and OAuth tokens
+CONFIG/credentials.json
+CONFIG/client_secrets.json
+
+# Generated data files
+DATA/*
+!DATA/.gitkeep
+
+# Training outputs and experiment logs
+SAVED_MODELS/*
+!SAVED_MODELS/.gitkeep
+TEST_MODELS/*
+!TEST_MODELS/.gitkeep
+runs/
+NOTEBOOKS/Pytorch_learn/runs/

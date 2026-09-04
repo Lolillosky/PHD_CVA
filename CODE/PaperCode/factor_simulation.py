@@ -1,4 +1,5 @@
 import torch
+from torch_config import resolve_device_dtype
 
 
 class RiskFactorSimulator:
@@ -12,17 +13,11 @@ class RiskFactorSimulator:
         correl_matrix,
         time_steps,
         device=None,
-        dtype=torch.float64,
+        dtype=None,
     ):
 
         self.num_risk_factors = num_risk_factors
-        if device is None:
-            resolved_device = "cpu"
-        else:
-            resolved_device = device
-
-        self.device = torch.device(resolved_device)
-        self.dtype = dtype
+        self.device, self.dtype = resolve_device_dtype(device, dtype)
 
         self.initial_spot_values = torch.as_tensor(initial_spot_values, dtype=self.dtype, device=self.device)
         self.drift_array = torch.as_tensor(drift_array, dtype=self.dtype, device=self.device)
@@ -195,6 +190,7 @@ class RiskFactorSimulator:
         # ================================================================== #
         # FORWARD SEGMENT  (pivot_step_idx … num_steps-1]                    #
         # ================================================================== #
+        paths_pivot = spot_at_pivot.unsqueeze(1)
         n_forward = num_steps - 1 - pivot_step_idx
 
         if n_forward > 0:
@@ -219,7 +215,7 @@ class RiskFactorSimulator:
         elif pivot_step_idx > 0:
             paths = paths_bridge
         else:
-            paths = paths_fwd
+            paths = torch.cat([paths_pivot, paths_fwd], dim=1) if n_forward > 0 else paths_pivot
 
         return paths     
     
@@ -276,4 +272,3 @@ class RiskFactorSimulator:
 
     
                                                # (num_sims, num_steps, num_rf)
-

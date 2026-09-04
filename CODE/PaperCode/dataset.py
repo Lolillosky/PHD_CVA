@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+from torch_config import resolve_device_dtype
 
 class DeepLearningCVADataset(Dataset):
     
@@ -8,12 +9,13 @@ class DeepLearningCVADataset(Dataset):
         self,
         x_file: str,
         y_file: str,
-        dtype: torch.dtype = torch.float64,
+        dtype=None,
         eps: float = 1e-8,
         x_mean = None,
         x_std = None,
         y_mean = None,
-        y_std = None
+        y_std = None,
+        device=None,
     ):
 
         
@@ -42,12 +44,13 @@ class DeepLearningCVADataset(Dataset):
                 f"X and y must have the same number of rows and columns, got {X.shape} and {y.shape}"
             )
     
-        self.dtype = dtype
-        self.num_inputs = X.shape[1]
+        self.device, self.dtype = resolve_device_dtype(device, dtype)
+        self.num_inputs = X.shape[2]
+        self.num_time_steps = X.shape[1]
 
         # Store tensors
-        self.X = torch.tensor((X - self.X_mu) / self.X_sigma, dtype=dtype)
-        self.y = torch.tensor((y - self.y_mu) / self.y_sigma, dtype=dtype)
+        self.X = torch.as_tensor((X - self.X_mu) / self.X_sigma, dtype=self.dtype, device=self.device)
+        self.y = torch.as_tensor((y - self.y_mu) / self.y_sigma, dtype=self.dtype, device=self.device)
 
         self.len = self.X.shape[0]
 
@@ -56,4 +59,3 @@ class DeepLearningCVADataset(Dataset):
 
     def __len__(self) -> int:
         return self.len
-

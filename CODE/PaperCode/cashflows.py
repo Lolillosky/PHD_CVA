@@ -1,4 +1,5 @@
 import torch
+from torch_config import resolve_device_dtype
 
 
 def basket_geom_asian_cashflows(
@@ -9,7 +10,7 @@ def basket_geom_asian_cashflows(
     IsCall,
     strike=1.0,
     device=None,
-    dtype=torch.float64,
+    dtype=None,
     keep_feature_dim=True,
 ):
     """
@@ -23,6 +24,8 @@ def basket_geom_asian_cashflows(
     the initial fixing, the t=0 fixing is excluded from the Asian product, and
     the strike defaults to 1.0.
     """
+
+    device, dtype = resolve_device_dtype(device, dtype)
 
     init_time_array = torch.as_tensor(init_time_array, device=device, dtype=dtype)
     risk_free_rate = torch.as_tensor(risk_free_rate, device=device, dtype=dtype)

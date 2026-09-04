@@ -1,12 +1,10 @@
 import torch
-
-
-N = torch.distributions.Normal(loc=0.0, scale=1.0).cdf
+from torch_config import resolve_device_dtype, standard_normal_cdf
 
 
 def black(Forward: torch.FloatTensor, Strike: torch.FloatTensor, 
           TTM: torch.FloatTensor, rate: torch.FloatTensor, Vol: torch.FloatTensor,
-          IsCall: bool,  device=None, dtype=torch.float64,) -> torch.FloatTensor  :
+          IsCall: bool,  device=None, dtype=None,) -> torch.FloatTensor  :
 
   '''
   Inputs:
@@ -22,33 +20,12 @@ def black(Forward: torch.FloatTensor, Strike: torch.FloatTensor,
     Option premium (float)
   '''
 
-  if TTM >0:
-
-    d1 = (torch.log(Forward/Strike) + (Vol*Vol/2)*TTM)/(Vol*torch.sqrt(TTM))
-    d2 = (torch.log(Forward/Strike) + (- Vol*Vol/2)*TTM)/(Vol*torch.sqrt(TTM))
-
-    if IsCall:
-
-      return (Forward*N(d1)-Strike*N(d2))*torch.exp(-rate*TTM)
-
-    else:
-
-      return (-Forward*N(-d1)+Strike*N(-d2))*torch.exp(-rate*TTM)
-
-  else:
-
-    if IsCall:
-
-      return torch.maximum(Forward-Strike,0)
-
-    else:
-
-      return torch.maximum(-Forward+Strike,0)
+  return black_vectorized(Forward, Strike, TTM, rate, Vol, IsCall, device=device, dtype=dtype)
 
 
 def black_vectorized(Forward: torch.FloatTensor, Strike: torch.FloatTensor,
                      TTM: torch.FloatTensor, rate: torch.FloatTensor, Vol: torch.FloatTensor,
-                     IsCall: bool, device=None, dtype=torch.float64,
+                     IsCall: bool, device=None, dtype=None,
                      eps: float = 1e-12) -> torch.FloatTensor:
 
   '''
@@ -57,6 +34,8 @@ def black_vectorized(Forward: torch.FloatTensor, Strike: torch.FloatTensor,
   Inputs can be scalars or tensors with broadcast-compatible shapes.
   This function supports mixed batches where some maturities are zero.
   '''
+
+  device, dtype = resolve_device_dtype(device, dtype)
 
   # Promote inputs to tensors for broadcasted elementwise operations.
   Forward = torch.as_tensor(Forward, device=device, dtype=dtype)
@@ -88,8 +67,8 @@ def black_vectorized(Forward: torch.FloatTensor, Strike: torch.FloatTensor,
   d2 = d1 - safe_vol * sqrt_ttm
 
   discount = torch.exp(-rate * safe_ttm)
-  call_price = (Forward * N(d1) - Strike * N(d2)) * discount
-  put_price = (-Forward * N(-d1) + Strike * N(-d2)) * discount
+  call_price = (Forward * standard_normal_cdf(d1) - Strike * standard_normal_cdf(d2)) * discount
+  put_price = (-Forward * standard_normal_cdf(-d1) + Strike * standard_normal_cdf(-d2)) * discount
   model_price = call_price if IsCall else put_price
 
   intrinsic = torch.maximum(Forward - Strike, torch.zeros_like(Forward)) if IsCall \
@@ -100,7 +79,8 @@ def black_vectorized(Forward: torch.FloatTensor, Strike: torch.FloatTensor,
 
 
 def basket_geom_asian(init_time_array, value_date_index, risk_free_rate, num_assets,
-                     assets_vol, assets_correl, price_history, IsCall):
+                     assets_vol, assets_correl, price_history, IsCall,
+                     device=None, dtype=None):
   '''
   Inputs:
   -------
@@ -117,6 +97,12 @@ def basket_geom_asian(init_time_array, value_date_index, risk_free_rate, num_ass
   * Option price (float)
   '''
 
+  device, dtype = resolve_device_dtype(device, dtype)
+  init_time_array = torch.as_tensor(init_time_array, device=device, dtype=dtype)
+  assets_vol = torch.as_tensor(assets_vol, device=device, dtype=dtype)
+  assets_correl = torch.as_tensor(assets_correl, device=device, dtype=dtype)
+  risk_free_rate = torch.as_tensor(risk_free_rate, device=device, dtype=dtype)
+  price_history = torch.as_tensor(price_history, device=device, dtype=dtype)
 
 
   num_asian_dates = len(init_time_array)
@@ -139,14 +125,15 @@ def basket_geom_asian(init_time_array, value_date_index, risk_free_rate, num_ass
   Forward *= torch.exp(mu + 0.5 * V)
 
   remaining_maturity = init_time_array[-1] - init_time_array[value_date_index]
+  safe_remaining_maturity = torch.clamp(remaining_maturity, min=1e-12)
 
 
-  return black(Forward, 1.0, remaining_maturity, risk_free_rate, torch.sqrt(V / remaining_maturity), IsCall)
+  return black(Forward, 1.0, remaining_maturity, risk_free_rate, torch.sqrt(V / safe_remaining_maturity), IsCall, device=device, dtype=dtype)
 
 
 def basket_geom_asian_vectorized(init_time_array, risk_free_rate, num_assets,
                                  assets_vol, assets_correl, price_history, IsCall,
-                                 device=None, dtype=torch.float64,
+                                 device=None, dtype=None,
                                  keep_feature_dim=True):
   '''
   Inputs:
@@ -166,6 +153,8 @@ def basket_geom_asian_vectorized(init_time_array, risk_free_rate, num_assets,
   * Option values with RNN-style shape (simulations, time, 1), or
     (simulations, time) when keep_feature_dim is False.
   '''
+
+  device, dtype = resolve_device_dtype(device, dtype)
 
   init_time_array = torch.as_tensor(init_time_array, device=device, dtype=dtype)
   assets_vol = torch.as_tensor(assets_vol, device=device, dtype=dtype)
