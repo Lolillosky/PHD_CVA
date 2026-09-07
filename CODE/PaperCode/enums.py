@@ -1,5 +1,5 @@
 from enum import Enum
 
 class RNNType(Enum):
-    RNN = 1
-    GRU = 2
+    GRU = 1
+    LSTM = 2
