@@ -1,4 +1,7 @@
+import numpy as np
 import torch
+
+import enums
 from torch_config import resolve_device_dtype
 
 
@@ -77,3 +80,82 @@ def basket_geom_asian_cashflows(
         return_dict["discounted_cashflows"] = discounted_payoffs.unsqueeze(-1)
 
     return return_dict
+
+
+class geometric_basket_asian_cashflows:
+    _DATE_TOLERANCE = 1e-12
+
+    def __init__(self, num_assets, init_fixing_date, payment_date,
+                 fixing_frequency, end_broken_period=True, strike=1.0, is_call=True,
+                 device=None, dtype=None, keep_feature_dim=False,
+                 end_broken_pediod=None):
+
+        self.num_assets = num_assets
+        self.init_fixing_date = init_fixing_date
+        self.payment_date = payment_date
+        self.strike = strike
+        self.is_call = is_call
+        self.device = device
+        self.dtype = dtype
+        self.keep_feature_dim = keep_feature_dim
+        self.fixing_frequency = fixing_frequency
+
+        if not isinstance(self.fixing_frequency, enums.DateFrequency):
+            raise ValueError("fixing_frequency must be an instance of DateFrequency")
+
+        self.fixing_interval = float(self.fixing_frequency.value)
+        if self.fixing_interval <= 0:
+            raise ValueError("fixing_frequency must imply a positive interval")
+
+        if self.payment_date <= self.init_fixing_date:
+            raise ValueError("payment_date must be greater than init_fixing_date")
+
+        if end_broken_pediod is not None:
+            end_broken_period = end_broken_pediod
+
+        self.end_broken_period = bool(end_broken_period)
+        self.end_broken_pediod = self.end_broken_period
+        self.product_dates = self._build_product_dates()
+
+    def _build_product_dates(self):
+        total_period = self.payment_date - self.init_fixing_date
+        regular_periods = int(np.floor(total_period / self.fixing_interval + self._DATE_TOLERANCE))
+
+        if self.end_broken_period:
+            dates = self.init_fixing_date + self.fixing_interval * np.arange(regular_periods + 1)
+            if np.isclose(dates[-1], self.payment_date, atol=self._DATE_TOLERANCE, rtol=0.0):
+                dates[-1] = self.payment_date
+            else:
+                dates = np.append(dates, self.payment_date)
+        else:
+            dates = self.payment_date - self.fixing_interval * np.arange(regular_periods + 1)
+            dates = dates[::-1]
+            if np.isclose(dates[0], self.init_fixing_date, atol=self._DATE_TOLERANCE, rtol=0.0):
+                dates[0] = self.init_fixing_date
+            else:
+                dates = np.insert(dates, 0, self.init_fixing_date)
+
+        return dates
+
+
+    def get_product_dates(self):
+        return self.product_dates
+
+    def set_product_indexes(self, indexes):
+        self.product_indexes = indexes
+
+    def compute_cashflows(self, asset_prices):
+        if not hasattr(self, "product_indexes"):
+            raise ValueError("Product indexes have not been set.")
+
+        relevant_prices = asset_prices[:, self.product_indexes]
+        geometric_average = np.exp(np.mean(np.log(relevant_prices), axis=1))
+        if self.is_call:
+            cashflows = np.maximum(geometric_average - self.strike, 0.0)
+        else:
+            cashflows = np.maximum(self.strike - geometric_average, 0.0)
+
+        if self.keep_feature_dim:
+            cashflows = cashflows[:, np.newaxis]
+
+        return cashflows
