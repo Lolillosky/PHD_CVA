@@ -3,5 +3,6 @@
     
     "python.analysis.extraPaths": [
         "${workspaceFolder}/CODE/PaperCode"
-    ]
+    ],
+    "markdown.math.enabled": true
 }

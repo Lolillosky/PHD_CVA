@@ -5,6 +5,49 @@ import enums
 from torch_config import resolve_device_dtype
 
 
+def build_simulation_date_grid(ccr_dates, product_dates, tol = 1e-8):
+    """
+    Build the simulation date grid and map input dates into that grid.
+
+    The simulation grid is the sorted union of CCR observation dates and product
+    dates. Product dates are grouped by cash flow, and the returned product
+    indexes preserve that grouping.
+
+    Parameters
+    ----------
+    ccr_dates : array-like
+        CCR observation dates.
+    product_dates : sequence of array-like
+        Product fixing/payment dates grouped by cash flow.
+
+    Returns
+    -------
+    dict
+        Dictionary with ``simulation_dates``, ``ccr_indexes`` and
+        ``product_indexes``. ``product_indexes`` is a list with one index array
+        per product date set.
+    """
+    ccr_dates = np.round(ccr_dates / tol) * tol
+    product_dates = [
+      np.round(cashflow_dates / tol) * tol
+        for cashflow_dates in product_dates
+    ]
+    all_product_dates = np.concatenate([dates.reshape(-1) for dates in product_dates])
+
+    simulation_dates = np.union1d(ccr_dates, all_product_dates)
+    ccr_indexes = np.searchsorted(simulation_dates, ccr_dates)
+    product_indexes = [
+        np.searchsorted(simulation_dates, dates).reshape(dates.shape)
+        for dates in product_dates
+    ]
+
+    return {
+        "simulation_dates": simulation_dates,
+        "ccr_indexes": ccr_indexes,
+        "product_indexes": product_indexes,
+    }
+
+
 def basket_geom_asian_cashflows(
     init_time_array,
     risk_free_rate,
@@ -83,12 +126,11 @@ def basket_geom_asian_cashflows(
 
 
 class geometric_basket_asian_cashflows:
-    _DATE_TOLERANCE = 1e-12
+
 
     def __init__(self, num_assets, init_fixing_date, payment_date,
                  fixing_frequency, end_broken_period=True, strike=1.0, is_call=True,
-                 device=None, dtype=None, keep_feature_dim=False,
-                 end_broken_pediod=None):
+                 device=None, dtype=None, keep_feature_dim=False):
 
         self.num_assets = num_assets
         self.init_fixing_date = init_fixing_date
@@ -99,6 +141,7 @@ class geometric_basket_asian_cashflows:
         self.dtype = dtype
         self.keep_feature_dim = keep_feature_dim
         self.fixing_frequency = fixing_frequency
+        self.end_broken_period = end_broken_period
 
         if not isinstance(self.fixing_frequency, enums.DateFrequency):
             raise ValueError("fixing_frequency must be an instance of DateFrequency")
@@ -110,33 +153,22 @@ class geometric_basket_asian_cashflows:
         if self.payment_date <= self.init_fixing_date:
             raise ValueError("payment_date must be greater than init_fixing_date")
 
-        if end_broken_pediod is not None:
-            end_broken_period = end_broken_pediod
-
-        self.end_broken_period = bool(end_broken_period)
-        self.end_broken_pediod = self.end_broken_period
+   
         self.product_dates = self._build_product_dates()
 
     def _build_product_dates(self):
-        total_period = self.payment_date - self.init_fixing_date
-        regular_periods = int(np.floor(total_period / self.fixing_interval + self._DATE_TOLERANCE))
 
-        if self.end_broken_period:
-            dates = self.init_fixing_date + self.fixing_interval * np.arange(regular_periods + 1)
-            if np.isclose(dates[-1], self.payment_date, atol=self._DATE_TOLERANCE, rtol=0.0):
-                dates[-1] = self.payment_date
-            else:
-                dates = np.append(dates, self.payment_date)
-        else:
-            dates = self.payment_date - self.fixing_interval * np.arange(regular_periods + 1)
+        if not self.end_broken_period:
+            dates = np.arange(self.payment_date, self.init_fixing_date, -self.fixing_interval)
+            dates = np.append(dates, self.init_fixing_date)
             dates = dates[::-1]
-            if np.isclose(dates[0], self.init_fixing_date, atol=self._DATE_TOLERANCE, rtol=0.0):
-                dates[0] = self.init_fixing_date
-            else:
-                dates = np.insert(dates, 0, self.init_fixing_date)
+
+
+        else:
+            dates = np.arange(self.init_fixing_date, self.payment_date, self.fixing_interval)
+            dates = np.append(dates, self.payment_date)
 
         return dates
-
 
     def get_product_dates(self):
         return self.product_dates
