@@ -5,11 +5,12 @@ import numpy as np
 import pandas as pd
 import torch
 import matplotlib.pyplot as plt
+import lightning.pytorch as pl
 from scipy.stats import ks_2samp, spearmanr
 from torch.utils.data import DataLoader
 
 from dataset import DeepLearningCVADataset
-from models import CCRDeepModelTrainer
+from models import CCRDeepModel, LitGenericModel
 from option_formulas import basket_geom_asian_vectorized
 
 
@@ -33,6 +34,58 @@ def get_gpu_device_name():
     return None
 
 
+class LossHistory(pl.Callback):
+    def __init__(self):
+        self.history = []
+        self._rows_by_epoch = {}
+
+    @staticmethod
+    def _metric_to_float(metrics, name):
+        value = metrics.get(name)
+        return None if value is None else float(value.detach().cpu())
+
+    def _row_for_epoch(self, epoch):
+        if epoch not in self._rows_by_epoch:
+            row = {"epoch": epoch, "train_loss": None, "val_loss": None}
+            self._rows_by_epoch[epoch] = row
+            self.history.append(row)
+        return self._rows_by_epoch[epoch]
+
+    def on_train_epoch_end(self, trainer, pl_module):
+        metrics = trainer.callback_metrics
+        row = self._row_for_epoch(trainer.current_epoch + 1)
+        row["train_loss"] = self._metric_to_float(metrics, "loss.train")
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        if trainer.sanity_checking:
+            return
+        metrics = trainer.callback_metrics
+        row = self._row_for_epoch(trainer.current_epoch + 1)
+        row["val_loss"] = self._metric_to_float(metrics, "loss.valid")
+
+
+def _lightning_accelerator_kwargs(device_name):
+    if device_name in (None, "cpu"):
+        return {"accelerator": "cpu", "devices": 1}
+    if device_name == "cuda":
+        return {"accelerator": "gpu", "devices": 1}
+    if device_name == "mps":
+        return {"accelerator": "mps", "devices": 1}
+    return {"accelerator": device_name, "devices": 1}
+
+
+def _lightning_precision_from_dtype(dtype, device_name):
+    if dtype is None:
+        return "32-true"
+    if dtype == torch.float32:
+        return "32-true"
+    if dtype == torch.float64:
+        if device_name == "mps":
+            raise ValueError("MPS does not support torch.float64. Use torch.float32 instead.")
+        return "64-true"
+    raise ValueError(f"Unsupported Lightning dtype: {dtype}")
+
+
 def build_dataloaders(data_dir, model_dtype, batch_size):
     train_dataset = DeepLearningCVADataset(
         str(data_dir / "X_CVA_train.npy"),
@@ -54,14 +107,22 @@ def build_dataloaders(data_dir, model_dtype, batch_size):
     return train_dataset, test_dataset, train_loader, test_loader
 
 
-def predict_nn_values(trainer, test_dataset, test_loader):
-    trainer.model.eval()
+def _model_device_dtype(model):
+    parameter = next(model.parameters(), None)
+    if parameter is None:
+        return torch.device("cpu"), torch.get_default_dtype()
+    return parameter.device, parameter.dtype
+
+
+def predict_nn_values(model, test_dataset, test_loader):
+    model.eval()
+    device, dtype = _model_device_dtype(model)
     scaled_predictions = []
 
     with torch.no_grad():
         for X_batch, _ in test_loader:
-            X_batch = X_batch.to(trainer.device, dtype=trainer.dtype)
-            scaled_predictions.append(trainer.model(X_batch).detach().cpu())
+            X_batch = X_batch.to(device=device, dtype=dtype)
+            scaled_predictions.append(model(X_batch).detach().cpu())
 
     scaled_predictions = torch.cat(scaled_predictions, dim=0).numpy()
     return test_dataset.y_mu + scaled_predictions * test_dataset.y_sigma
@@ -118,24 +179,56 @@ def train_and_evaluate(
         batch_size,
     )
 
-    trainer = CCRDeepModelTrainer(
-        **model_kwargs,
-        train_dataloader=train_loader,
-        val_dataloader=test_loader,
+    model = CCRDeepModel(**model_kwargs)
+    lit_model = LitGenericModel(
+        model=model,
+        loss=torch.nn.MSELoss(),
+        scorelist=[],
         lr=lr,
-        device=device_name,
-        dtype=model_dtype,
+    )
+    loss_history = LossHistory()
+    trainer = pl.Trainer(
+        max_epochs=epochs,
+        callbacks=[loss_history],
+        enable_checkpointing=False,
+        enable_progress_bar=print_progress,
+        logger=False,
+        precision=_lightning_precision_from_dtype(model_dtype, device_name),
+        **_lightning_accelerator_kwargs(device_name),
     )
 
     start = time.perf_counter()
-    history = trainer.fit(epochs, print_progress=print_progress)
+    trainer.fit(lit_model, train_dataloaders=train_loader, val_dataloaders=test_loader)
     if device_name == "cuda":
         torch.cuda.synchronize()
     elif device_name == "mps" and hasattr(torch, "mps"):
         torch.mps.synchronize()
     training_seconds = time.perf_counter() - start
 
-    trainer.save(str(model_save_path))
+    history = loss_history.history
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "lightning_state_dict": lit_model.state_dict(),
+            "model_kwargs": {
+                **model_kwargs,
+                "rnn_type": model_kwargs["rnn_type"].name,
+            },
+            "lr": lr,
+            "precision": _lightning_precision_from_dtype(model_dtype, device_name),
+            "epoch": trainer.current_epoch,
+            "history": history,
+            "best_val_loss": min(
+                (row["val_loss"] for row in history if row["val_loss"] is not None),
+                default=None,
+            ),
+            "X_mu": train_dataset.X_mu,
+            "X_sigma": train_dataset.X_sigma,
+            "y_mu": train_dataset.y_mu,
+            "y_sigma": train_dataset.y_sigma,
+        },
+        str(model_save_path),
+    )
 
     test_paths = np.load(data_dir / "X_CVA_test.npy").astype(np.float32)
     closed_form_values = compute_closed_form_values(
@@ -148,7 +241,7 @@ def train_and_evaluate(
         pricing_dtype,
         is_call=is_call,
     )
-    nn_values = predict_nn_values(trainer, test_dataset, test_loader)
+    nn_values = predict_nn_values(lit_model, test_dataset, test_loader)
 
     expected_shape = (len(test_dataset), len(time_steps))
     if closed_form_values.shape != expected_shape:
@@ -156,12 +249,14 @@ def train_and_evaluate(
     if nn_values.shape != expected_shape:
         raise ValueError(f"nn_values has shape {nn_values.shape}, expected {expected_shape}")
 
-    print(f"{device_name.upper()} training time: {training_seconds:.2f}s")
+    device_label = "cpu" if device_name is None else str(device_name)
+    print(f"{device_label.upper()} training time: {training_seconds:.2f}s")
     print(f"Saved model to {model_save_path}")
 
     return {
         "device": device_name,
         "trainer": trainer,
+        "model": lit_model,
         "history": history,
         "training_seconds": training_seconds,
         "test_paths": test_paths,

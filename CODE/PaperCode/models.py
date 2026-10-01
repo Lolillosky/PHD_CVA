@@ -2,18 +2,17 @@ import torch
 import torch.nn as nn
 import enums
 from torch_config import resolve_device_dtype
+import lightning.pytorch as pl
 
 
 
 class CCRDeepModel(nn.Module):
     def __init__(self, number_risk_factors, num_rnn_layers, num_rnn_hidden_units, rnn_type, 
-                 num_deep_layers, deep_hidden_units, device=None, dtype=None):
+                 num_deep_layers, deep_hidden_units):
 
         super(CCRDeepModel, self).__init__()
 
-        self.device, self.dtype = resolve_device_dtype(device, dtype)
         self.rnn_type = rnn_type
-        factory_kwargs = {"device": self.device, "dtype": self.dtype}
         if num_rnn_layers < 0:
             raise ValueError("num_rnn_layers must be non-negative")
         if num_deep_layers < 0:
@@ -24,10 +23,10 @@ class CCRDeepModel(nn.Module):
             self.rnn = None
             input_size = number_risk_factors
         elif rnn_type == enums.RNNType.GRU:
-            self.rnn = nn.GRU(input_size=number_risk_factors, hidden_size=num_rnn_hidden_units, num_layers=num_rnn_layers, batch_first=True, **factory_kwargs)
+            self.rnn = nn.GRU(input_size=number_risk_factors, hidden_size=num_rnn_hidden_units, num_layers=num_rnn_layers, batch_first=True)
             input_size = num_rnn_hidden_units
         elif rnn_type == enums.RNNType.LSTM:
-            self.rnn = nn.LSTM(input_size=number_risk_factors, hidden_size=num_rnn_hidden_units, num_layers=num_rnn_layers, batch_first=True, **factory_kwargs)
+            self.rnn = nn.LSTM(input_size=number_risk_factors, hidden_size=num_rnn_hidden_units, num_layers=num_rnn_layers, batch_first=True)
             input_size = num_rnn_hidden_units
         else:
             raise ValueError("Unsupported rnn_type: {}. Use RNNType.GRU or RNNType.LSTM.".format(rnn_type))
@@ -35,12 +34,12 @@ class CCRDeepModel(nn.Module):
         # Feed-forward head maps each timestep feature vector to a scalar CVA value.
         deep_layers = []
         for _ in range(num_deep_layers):
-            deep_layers.append(nn.Linear(input_size, deep_hidden_units, **factory_kwargs))
+            deep_layers.append(nn.Linear(input_size, deep_hidden_units))
             deep_layers.append(nn.Softplus())
             input_size = deep_hidden_units
         self.deep = nn.Sequential(*deep_layers)
 
-        self.output_layer = nn.Linear(input_size, 1, **factory_kwargs)
+        self.output_layer = nn.Linear(input_size, 1)
 
     def forward(self, x):
         # x shape: (batch_size, time_steps, number_risk_factors)
@@ -89,9 +88,7 @@ class CCRDeepModelTrainer:
             rnn_type=rnn_type,
             num_deep_layers=num_deep_layers,
             deep_hidden_units=deep_hidden_units,
-            device=self.device,
-            dtype=self.dtype,
-        )
+        ).to(device=self.device, dtype=self.dtype)
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
         self.loss_fn = nn.MSELoss() if loss_fn is None else loss_fn
 
@@ -291,3 +288,80 @@ class CCRDeepModelTrainer:
         if dtype_str == "float32":
             return torch.float32
         raise ValueError(f"Unsupported dtype in checkpoint: {dtype_str}")
+
+
+
+class LitGenericModel(pl.LightningModule):
+    def __init__(self, model, loss, scorelist=None, lr=1e-3):
+        super().__init__()
+        self.save_hyperparameters(ignore=["model", "loss", "scorelist"])
+
+        self.model = model
+        self.loss = loss
+        self.scorelist = [] if scorelist is None else scorelist
+
+    def forward(self, x):
+        return self.model(x)
+
+    def _model_dtype(self):
+        parameter = next(self.parameters(), None)
+        return None if parameter is None else parameter.dtype
+
+    def _cast_floating_tensors(self, data, dtype):
+        if dtype is None:
+            return data
+        if torch.is_tensor(data):
+            return data.to(dtype=dtype) if torch.is_floating_point(data) else data
+        if isinstance(data, tuple) and hasattr(data, "_fields"):
+            return type(data)(*(self._cast_floating_tensors(item, dtype) for item in data))
+        if isinstance(data, tuple):
+            return tuple(self._cast_floating_tensors(item, dtype) for item in data)
+        if isinstance(data, list):
+            return [self._cast_floating_tensors(item, dtype) for item in data]
+        if isinstance(data, dict):
+            return {key: self._cast_floating_tensors(value, dtype) for key, value in data.items()}
+        return data
+
+    def transfer_batch_to_device(self, batch, device, dataloader_idx):
+        batch = super().transfer_batch_to_device(batch, device, dataloader_idx)
+        return self._cast_floating_tensors(batch, self._model_dtype())
+
+    def _shared_step(self, batch):
+        xs, ys = batch
+        ys_estimate = self(xs)
+        loss = self.loss(ys_estimate, ys)
+
+        score = []
+
+        for score_fn in self.scorelist:
+            score.append(score_fn(ys_estimate, ys))
+  
+        return loss, score, ys_estimate, ys
+
+    def training_step(self, batch, batch_idx):
+        loss, score, ys_estimate, ys = self._shared_step(batch)
+        self.log('loss.train', loss, on_epoch=True, on_step=False, prog_bar=True)
+        for i, s in enumerate(score):
+            self.log(f'score{i}.train', s, on_epoch=True, on_step=False, prog_bar=True)
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        loss, score, ys_estimate, ys = self._shared_step(batch)
+        self.log('loss.valid', loss, on_epoch=True, on_step=False, prog_bar=True)
+        for i, s in enumerate(score):
+            self.log(f'score{i}.valid', s, on_epoch=True, on_step=False, prog_bar=True)
+        return loss
+
+    def test_step(self, batch, batch_idx):
+        loss, score, ys_estimate, ys = self._shared_step(batch)
+        self.log('loss.test', loss, on_epoch=True, on_step=False, prog_bar=True)
+        for i, s in enumerate(score):
+            self.log(f'score{i}.test', s, on_epoch=True, on_step=False, prog_bar=True)
+        return loss
+
+    def predict_step(self, batch, batch_idx, dataloader_idx=0):
+        xs = batch[0] if isinstance(batch, (tuple, list)) else batch
+        return self(xs)
+
+    def configure_optimizers(self):
+        return torch.optim.Adam(self.parameters(), lr=self.hparams.lr)
