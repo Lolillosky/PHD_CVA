@@ -303,28 +303,6 @@ class LitGenericModel(pl.LightningModule):
     def forward(self, x):
         return self.model(x)
 
-    def _model_dtype(self):
-        parameter = next(self.parameters(), None)
-        return None if parameter is None else parameter.dtype
-
-    def _cast_floating_tensors(self, data, dtype):
-        if dtype is None:
-            return data
-        if torch.is_tensor(data):
-            return data.to(dtype=dtype) if torch.is_floating_point(data) else data
-        if isinstance(data, tuple) and hasattr(data, "_fields"):
-            return type(data)(*(self._cast_floating_tensors(item, dtype) for item in data))
-        if isinstance(data, tuple):
-            return tuple(self._cast_floating_tensors(item, dtype) for item in data)
-        if isinstance(data, list):
-            return [self._cast_floating_tensors(item, dtype) for item in data]
-        if isinstance(data, dict):
-            return {key: self._cast_floating_tensors(value, dtype) for key, value in data.items()}
-        return data
-
-    def transfer_batch_to_device(self, batch, device, dataloader_idx):
-        batch = super().transfer_batch_to_device(batch, device, dataloader_idx)
-        return self._cast_floating_tensors(batch, self._model_dtype())
 
     def _shared_step(self, batch):
         xs, ys = batch
