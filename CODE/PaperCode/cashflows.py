@@ -5,47 +5,6 @@ import enums
 from torch_config import resolve_device_dtype
 
 
-def build_simulation_date_grid(ccr_dates, product_dates, tol = 1e-8):
-    """
-    Build the simulation date grid and map input dates into that grid.
-
-    The simulation grid is the sorted union of CCR observation dates and product
-    dates. Product dates are grouped by cash flow, and the returned product
-    indexes preserve that grouping.
-
-    Parameters
-    ----------
-    ccr_dates : array-like
-        CCR observation dates.
-    product_dates : sequence of array-like
-        Product fixing/payment dates grouped by cash flow.
-
-    Returns
-    -------
-    dict
-        Dictionary with ``simulation_dates``, ``ccr_indexes`` and
-        ``product_indexes``. ``product_indexes`` is a list with one index array
-        per product date set.
-    """
-    ccr_dates = np.round(ccr_dates / tol) * tol
-    product_dates = [
-      np.round(cashflow_dates / tol) * tol
-        for cashflow_dates in product_dates
-    ]
-    all_product_dates = np.concatenate([dates.reshape(-1) for dates in product_dates])
-
-    simulation_dates = np.union1d(ccr_dates, all_product_dates)
-    ccr_indexes = np.searchsorted(simulation_dates, ccr_dates)
-    product_indexes = [
-        np.searchsorted(simulation_dates, dates).reshape(dates.shape)
-        for dates in product_dates
-    ]
-
-    return {
-        "simulation_dates": simulation_dates,
-        "ccr_indexes": ccr_indexes,
-        "product_indexes": product_indexes,
-    }
 
 
 def basket_geom_asian_cashflows(
@@ -125,12 +84,12 @@ def basket_geom_asian_cashflows(
     return return_dict
 
 
-class geometric_basket_asian_cashflows:
+class GeometricBasketAsianCashflows:
 
 
     def __init__(self, num_assets, init_fixing_date, payment_date,
                  fixing_frequency, end_broken_period=True, strike=1.0, is_call=True,
-                 device=None, dtype=None, keep_feature_dim=False):
+                 device=None, dtype=None):
 
         self.num_assets = num_assets
         self.init_fixing_date = init_fixing_date
@@ -139,9 +98,9 @@ class geometric_basket_asian_cashflows:
         self.is_call = is_call
         self.device = device
         self.dtype = dtype
-        self.keep_feature_dim = keep_feature_dim
         self.fixing_frequency = fixing_frequency
         self.end_broken_period = end_broken_period
+
 
         if not isinstance(self.fixing_frequency, enums.DateFrequency):
             raise ValueError("fixing_frequency must be an instance of DateFrequency")
@@ -176,7 +135,7 @@ class geometric_basket_asian_cashflows:
     def set_product_indexes(self, indexes):
         self.product_indexes = indexes
 
-    def compute_cashflows(self, asset_prices):
+    def compute_cashflows(self, asset_prices ,cashflows_matrix):
         if not hasattr(self, "product_indexes"):
             raise ValueError("Product indexes have not been set.")
 
@@ -190,4 +149,79 @@ class geometric_basket_asian_cashflows:
         if self.keep_feature_dim:
             cashflows = cashflows[:, np.newaxis]
 
-        return cashflows
+        cashflows_matrix[:, self.product_indexes[-1]] += cashflows
+        
+        
+class CashFlowsHandler:
+
+    def __init__(self, ccr_dates, cashflow_object_list, device=None, dtype=None):
+
+
+        self.ccr_dates = ccr_dates
+        self.cashflow_object_list = cashflow_object_list
+        self.device = device
+        self.dtype = dtype
+
+        self.cashflow_object_list = cashflow_object_list
+
+        # Build the simulation date grid, the ccr indexes and product indexes for each cash flow
+        self.simulation_dates, self.ccr_indexes = self.build_simulation_date_grid_set_indexes(ccr_dates, self.cashflow_object_list)
+
+
+    def build_simulation_date_grid_set_indexes(self, ccr_dates, cashflow_object_list, tol = 1e-8):
+        """
+        Build the simulation date grid and map input dates into that grid.
+
+        The simulation grid is the sorted union of CCR observation dates and product
+        dates. Product dates are grouped by cash flow, and the returned product
+        indexes preserve that grouping.
+
+        Parameters
+        ----------
+        ccr_dates : array-like
+            CCR observation dates.
+        cashflow_object_list : sequence of Cashflow objects
+            List of cash flow objects, each providing its fixing/payment dates.
+
+        Returns
+        -------
+        dict
+            Dictionary with ``simulation_dates``, ``ccr_indexes``. It also sets the product indexes on each cash flow object.
+        """
+        ccr_dates = np.round(ccr_dates / tol) * tol
+        product_dates = [
+        np.round(cf.get_product_dates() / tol) * tol
+            for cf in cashflow_object_list
+        ]
+        all_product_dates = np.concatenate([dates.reshape(-1) for dates in product_dates])
+
+        simulation_dates = np.union1d(ccr_dates, all_product_dates)
+        ccr_indexes = np.searchsorted(simulation_dates, ccr_dates)
+        product_indexes = [
+            np.searchsorted(simulation_dates, dates).reshape(dates.shape)
+            for dates in product_dates
+        ]
+
+        for cf, indexes in zip(cashflow_object_list, product_indexes):
+            cf.set_product_indexes(indexes)
+
+        return simulation_dates, ccr_indexes
+    
+        
+    def compute_cashflows(self, risk_free_rate, asset_prices):
+
+
+        cashflows_matrix = torch.zeros((asset_prices.shape[0], asset_prices.shape[1]), device=self.device, dtype=self.dtype)
+
+        cashflows_matrix_ccr_dates = torch.zeros((asset_prices.shape[0], len(self.ccr_dates)), device=self.device, dtype=self.dtype)
+
+        for cf in self.cashflow_object_list:
+
+            cf.compute_cashflows(asset_prices, cashflows_matrix)
+
+        return cashflows_matrix
+
+
+    
+
+
