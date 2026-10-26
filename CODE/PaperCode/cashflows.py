@@ -92,12 +92,11 @@ class GeometricBasketAsianCashflows:
                  device=None, dtype=None):
 
         self.num_assets = num_assets
-        self.init_fixing_date = init_fixing_date
-        self.payment_date = payment_date
+        self.device, self.dtype = resolve_device_dtype(device, dtype)
+        self.init_fixing_date = torch.as_tensor(init_fixing_date, device=self.device, dtype=self.dtype)
+        self.payment_date = torch.as_tensor(payment_date, device=self.device, dtype=self.dtype)
         self.strike = strike
         self.is_call = is_call
-        self.device = device
-        self.dtype = dtype
         self.fixing_frequency = fixing_frequency
         self.end_broken_period = end_broken_period
 
@@ -118,14 +117,16 @@ class GeometricBasketAsianCashflows:
     def _build_product_dates(self):
 
         if not self.end_broken_period:
-            dates = np.arange(self.payment_date, self.init_fixing_date, -self.fixing_interval)
-            dates = np.append(dates, self.init_fixing_date)
-            dates = dates[::-1]
+            dates = torch.arange(self.payment_date.item(), self.init_fixing_date.item(), -self.fixing_interval,
+                                 device=self.device, dtype=self.dtype)
+            dates = torch.cat((dates, self.init_fixing_date.reshape(1)))
+            dates = dates.flip(0)
 
 
         else:
-            dates = np.arange(self.init_fixing_date, self.payment_date, self.fixing_interval)
-            dates = np.append(dates, self.payment_date)
+            dates = torch.arange(self.init_fixing_date.item(), self.payment_date.item(), self.fixing_interval,
+                                 device=self.device, dtype=self.dtype)
+            dates = torch.cat((dates, self.payment_date.reshape(1)))
 
         return dates
 
@@ -140,14 +141,13 @@ class GeometricBasketAsianCashflows:
             raise ValueError("Product indexes have not been set.")
 
         relevant_prices = asset_prices[:, self.product_indexes]
-        geometric_average = np.exp(np.mean(np.log(relevant_prices), axis=1))
+        averaging_dims = tuple(range(1, relevant_prices.ndim))
+        geometric_average = torch.exp(torch.mean(torch.log(relevant_prices), dim=averaging_dims))
+        strike = torch.as_tensor(self.strike, device=asset_prices.device, dtype=asset_prices.dtype)
         if self.is_call:
-            cashflows = np.maximum(geometric_average - self.strike, 0.0)
+            cashflows = torch.clamp(geometric_average - strike, min=0.0)
         else:
-            cashflows = np.maximum(self.strike - geometric_average, 0.0)
-
-        if self.keep_feature_dim:
-            cashflows = cashflows[:, np.newaxis]
+            cashflows = torch.clamp(strike - geometric_average, min=0.0)
 
         cashflows_matrix[:, self.product_indexes[-1]] += cashflows
         
@@ -157,15 +157,13 @@ class CashFlowsHandler:
     def __init__(self, ccr_dates, cashflow_object_list, device=None, dtype=None):
 
 
-        self.ccr_dates = ccr_dates
-        self.cashflow_object_list = cashflow_object_list
-        self.device = device
-        self.dtype = dtype
+        self.device, self.dtype = resolve_device_dtype(device, dtype)
+        self.ccr_dates = torch.as_tensor(ccr_dates, device=self.device, dtype=self.dtype)
 
         self.cashflow_object_list = cashflow_object_list
 
         # Build the simulation date grid, the ccr indexes and product indexes for each cash flow
-        self.simulation_dates, self.ccr_indexes = self.build_simulation_date_grid_set_indexes(ccr_dates, self.cashflow_object_list)
+        self.simulation_dates, self.ccr_indexes = self.build_simulation_date_grid_set_indexes(self.ccr_dates, self.cashflow_object_list)
 
 
     def build_simulation_date_grid_set_indexes(self, ccr_dates, cashflow_object_list, tol = 1e-8):
@@ -185,20 +183,22 @@ class CashFlowsHandler:
 
         Returns
         -------
-        dict
-            Dictionary with ``simulation_dates``, ``ccr_indexes``. It also sets the product indexes on each cash flow object.
+        tuple
+            Tensors ``simulation_dates`` and ``ccr_indexes``. It also sets the product indexes on each cash flow object.
         """
-        ccr_dates = np.round(ccr_dates / tol) * tol
+        ccr_dates = torch.as_tensor(ccr_dates, device=self.device, dtype=self.dtype)
+        ccr_dates = torch.round(ccr_dates / tol) * tol
+        self.ccr_dates = ccr_dates
         product_dates = [
-        np.round(cf.get_product_dates() / tol) * tol
+            torch.round(torch.as_tensor(cf.get_product_dates(), device=self.device, dtype=self.dtype) / tol) * tol
             for cf in cashflow_object_list
         ]
-        all_product_dates = np.concatenate([dates.reshape(-1) for dates in product_dates])
+        all_product_dates = torch.cat([dates.reshape(-1) for dates in product_dates]) if product_dates else ccr_dates.new_empty(0)
 
-        simulation_dates = np.union1d(ccr_dates, all_product_dates)
-        ccr_indexes = np.searchsorted(simulation_dates, ccr_dates)
+        simulation_dates = torch.unique(torch.cat((ccr_dates, all_product_dates)), sorted=True)
+        ccr_indexes = torch.searchsorted(simulation_dates, ccr_dates)
         product_indexes = [
-            np.searchsorted(simulation_dates, dates).reshape(dates.shape)
+            torch.searchsorted(simulation_dates, dates).reshape(dates.shape)
             for dates in product_dates
         ]
 
@@ -211,16 +211,32 @@ class CashFlowsHandler:
     def compute_cashflows(self, risk_free_rate, asset_prices):
 
 
+        risk_free_rate = torch.as_tensor(risk_free_rate, device=self.device, dtype=self.dtype)
         cashflows_matrix = torch.zeros((asset_prices.shape[0], asset_prices.shape[1]), device=self.device, dtype=self.dtype)
 
-        cashflows_matrix_ccr_dates = torch.zeros((asset_prices.shape[0], len(self.ccr_dates)), device=self.device, dtype=self.dtype)
 
         for cf in self.cashflow_object_list:
 
             cf.compute_cashflows(asset_prices, cashflows_matrix)
 
-        return cashflows_matrix
+    
+        indexes = torch.searchsorted(self.ccr_dates, self.simulation_dates, right=True) -1
 
+        discount_cash_flows_to_previous_ccr_date = cashflows_matrix * torch.exp(-risk_free_rate * (self.simulation_dates - self.ccr_dates[indexes]))
+
+        sum_discounted_cf_ccr_intervals = torch.zeros((cashflows_matrix.shape[0], len(self.ccr_dates)),dtype=cashflows_matrix.dtype, device=cashflows_matrix.device)
+
+        sum_discounted_cf_ccr_intervals.index_add_(1, indexes, discount_cash_flows_to_previous_ccr_date)
+
+
+        discounts = torch.exp(-risk_free_rate * (self.ccr_dates - self.ccr_dates[0]))
+        sum_discounted_cf_ccr = sum_discounted_cf_ccr_intervals  * discounts
+
+        sum_discounted_cf_ccr = (
+            sum_discounted_cf_ccr.flip(1).cumsum(dim=1).flip(1) / discounts
+        )
+
+        return sum_discounted_cf_ccr, sum_discounted_cf_ccr_intervals, cashflows_matrix
 
     
 
