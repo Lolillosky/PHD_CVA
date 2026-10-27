@@ -142,7 +142,7 @@ class GeometricBasketAsianCashflows:
 
         relevant_prices = asset_prices[:, self.product_indexes]
         averaging_dims = tuple(range(1, relevant_prices.ndim))
-        geometric_average = torch.exp(torch.mean(torch.log(relevant_prices), dim=averaging_dims))
+        geometric_average = torch.exp(torch.mean(torch.log(relevant_prices[:,1:,:]/relevant_prices[:,0,:].unsqueeze(1)), dim=averaging_dims))
         strike = torch.as_tensor(self.strike, device=asset_prices.device, dtype=asset_prices.dtype)
         if self.is_call:
             cashflows = torch.clamp(geometric_average - strike, min=0.0)
