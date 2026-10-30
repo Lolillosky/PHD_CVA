@@ -89,7 +89,7 @@ class GeometricBasketAsianCashflows:
 
     def __init__(self, num_assets, init_fixing_date, payment_date,
                  fixing_frequency, end_broken_period=True, strike=1.0, is_call=True,
-                 device=None, dtype=None):
+                 current_geom_average=None, first_fixing=None, device=None, dtype=None):
 
         self.num_assets = num_assets
         self.device, self.dtype = resolve_device_dtype(device, dtype)
@@ -99,6 +99,8 @@ class GeometricBasketAsianCashflows:
         self.is_call = is_call
         self.fixing_frequency = fixing_frequency
         self.end_broken_period = end_broken_period
+        self.current_geom_average = torch.as_tensor(current_geom_average, device=self.device, dtype=self.dtype) if current_geom_average is not None else None
+        self.first_fixing = torch.as_tensor(first_fixing, device=self.device, dtype=self.dtype) if first_fixing is not None else None
 
 
         if not isinstance(self.fixing_frequency, enums.DateFrequency):
@@ -136,13 +138,41 @@ class GeometricBasketAsianCashflows:
     def set_product_indexes(self, indexes):
         self.product_indexes = indexes
 
-    def compute_cashflows(self, asset_prices ,cashflows_matrix):
+    def compute_cashflows_and_path_dependency(self, asset_prices, cashflows_matrix,
+                                              path_dependency, mask):
         if not hasattr(self, "product_indexes"):
             raise ValueError("Product indexes have not been set.")
+        if asset_prices.shape[-1] != self.num_assets:
+            raise ValueError("num_assets does not match asset_prices.shape[-1]")
 
         relevant_prices = asset_prices[:, self.product_indexes]
-        averaging_dims = tuple(range(1, relevant_prices.ndim))
-        geometric_average = torch.exp(torch.mean(torch.log(relevant_prices[:,1:,:]/relevant_prices[:,0,:].unsqueeze(1)), dim=averaging_dims))
+        if self.product_dates[0] >= 0 and self.current_geom_average is None and self.first_fixing is None:
+            relative_prices = relevant_prices[:, 1:, :] / relevant_prices[:, :1, :]
+            fixing_indexes = self.product_indexes[1:]
+            initial_log_sum = asset_prices.new_zeros(asset_prices.shape[0])
+            past_fixings = 0
+        elif self.current_geom_average is not None and self.product_dates[0] < 0 and self.first_fixing is not None:
+            relative_prices = relevant_prices / self.first_fixing
+            fixing_indexes = self.product_indexes
+            past_fixings = int(((self.product_dates[1:] < 0).sum()).item())
+            initial_log_sum = self.current_geom_average.expand(asset_prices.shape[0]).log() * (self.num_assets * past_fixings)
+        else:
+            raise ValueError("Invalid state for product dates, current_geom_average and first_fixing")
+
+        # Combine the historical average and new fixings with their observation counts.
+        log_sums = torch.cat((initial_log_sum[:, None], initial_log_sum[:, None] +
+                              relative_prices.log().sum(dim=-1).cumsum(dim=1)), dim=1)
+        observations = (past_fixings + torch.arange(log_sums.shape[1], device=asset_prices.device)) * self.num_assets
+        averages = torch.exp(log_sums / observations.clamp_min(1))
+        geometric_average = averages[:, -1]
+        grid_indexes = torch.arange(asset_prices.shape[1], device=asset_prices.device)
+        counts = torch.searchsorted(fixing_indexes, grid_indexes, right=True)
+        active = grid_indexes <= self.product_indexes[-1]
+        if self.product_dates[0] >= 0:
+            active = active & (grid_indexes >= self.product_indexes[0])
+        path_dependency[:] = torch.where(active, averages[:, counts], 1.0)
+        mask[:] = active
+
         strike = torch.as_tensor(self.strike, device=asset_prices.device, dtype=asset_prices.dtype)
         if self.is_call:
             cashflows = torch.clamp(geometric_average - strike, min=0.0)
@@ -190,7 +220,7 @@ class CashFlowsHandler:
         ccr_dates = torch.round(ccr_dates / tol) * tol
         self.ccr_dates = ccr_dates
         product_dates = [
-            torch.round(torch.as_tensor(cf.get_product_dates(), device=self.device, dtype=self.dtype) / tol) * tol
+            torch.round(torch.as_tensor(cf.get_product_dates()[cf.get_product_dates()>=0], device=self.device, dtype=self.dtype) / tol) * tol
             for cf in cashflow_object_list
         ]
         all_product_dates = torch.cat([dates.reshape(-1) for dates in product_dates]) if product_dates else ccr_dates.new_empty(0)
@@ -215,9 +245,12 @@ class CashFlowsHandler:
         cashflows_matrix = torch.zeros((asset_prices.shape[0], asset_prices.shape[1]), device=self.device, dtype=self.dtype)
 
 
-        for cf in self.cashflow_object_list:
-
-            cf.compute_cashflows(asset_prices, cashflows_matrix)
+        path_dependency = torch.ones((*cashflows_matrix.shape, len(self.cashflow_object_list)),
+                                     device=self.device, dtype=self.dtype)
+        mask = torch.zeros_like(path_dependency, dtype=torch.bool)
+        for i, cf in enumerate(self.cashflow_object_list):
+            cf.compute_cashflows_and_path_dependency(asset_prices, cashflows_matrix,
+                                                    path_dependency[:, :, i], mask[:, :, i])
 
     
         indexes = torch.searchsorted(self.ccr_dates, self.simulation_dates, right=True) -1
@@ -236,7 +269,9 @@ class CashFlowsHandler:
             sum_discounted_cf_ccr.flip(1).cumsum(dim=1).flip(1) / discounts
         )
 
-        return sum_discounted_cf_ccr, sum_discounted_cf_ccr_intervals, cashflows_matrix
+        path_dependency = path_dependency[:, self.ccr_indexes, :]
+        mask = mask[:, self.ccr_indexes, :]
+        return sum_discounted_cf_ccr, sum_discounted_cf_ccr_intervals, cashflows_matrix, path_dependency, mask
 
     
 
